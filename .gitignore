@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Logs and outputs
+*.log
+logs/*.csv
+
+# Checkpoints and models
+checkpoints/*.pt
+
+# Editor
+.vscode/
+

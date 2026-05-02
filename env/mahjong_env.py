@@ -101,9 +101,9 @@ class WenzhouMahjongEnv:
         self.deck = generate_full_deck()
         random.shuffle(self.deck)
 
-        # 翻财神
+        # 翻财神 - 翻到什么牌，什么牌就是财神
         flip_card = self.deck[33]
-        self.caishen_id = get_next_tile(flip_card)
+        self.caishen_id = flip_card
         self.caishen = CaishenEngine(self.caishen_id)
         self.score_calc = ScoreCalculator(self.caishen_id, self.base_score)
 
@@ -236,9 +236,9 @@ class WenzhouMahjongEnv:
             self.chaos = True
             return self._get_observation(player), 0.0, True, {'winner': -1}
 
-        # 检查双方手牌都为空（异常结束）
-        if len(self.hands[0]) == 0 and len(self.hands[1]) == 0:
-            # 双方都没手牌了，算荒庄
+        # 检查任一玩家手牌为空（异常结束）
+        if len(self.hands[0]) == 0 or len(self.hands[1]) == 0:
+            # 任一方没手牌了，算荒庄
             self.chaos = True
             return self._get_observation(player), 0.0, True, {'winner': -1}
 

@@ -1,14 +1,16 @@
 """
-AlphaZero AI 自对弈测试
+AlphaZero AI 自对弈测试 - 优化版
+统计动作频率和动作选择率（当机会出现时）
 """
 
 import numpy as np
 import time
-from collections import deque
 import random
 
 from env import WenzhouMahjongEnv
 from ai import AlphaZeroAgent, AlphaZeroMCTS
+from game_state import GameState
+from rules import ACTION_CHI, ACTION_PENG, ACTION_MING_GANG, ACTION_JIA_GANG, ACTION_AN_GANG, ACTION_HU
 
 
 class SelfPlayTester:
@@ -16,8 +18,7 @@ class SelfPlayTester:
 
     def __init__(self):
         self.device = 'mps' if __import__('torch').backends.mps.is_available() else 'cpu'
-        self.agent = AlphaZeroAgent(state_dim=136, action_dim=34, device=self.device)
-        self.mcts = AlphaZeroMCTS(self.agent.net, caishen_id=0, num_simulations=30)
+        self.agent = AlphaZeroAgent(state_dim=136, action_dim=41, device=self.device)
         self.env = WenzhouMahjongEnv()
         print(f"使用设备: {self.device}")
 
@@ -25,51 +26,58 @@ class SelfPlayTester:
         """玩一局"""
         state = self.env.reset()
 
-        trajectories = []
-        current = 1  # 庄家先出
         game_history = {0: [], 1: []}
         last_discarded = None
 
         while True:
             state = self.env.get_state()
+            current = self.env.current_player
             hand = state['hand']
-            legal_actions = state['legal_actions']
+            legal_actions = self.env.get_legal_actions_full(current)
 
-            # MCTS搜索 - 使用完整合法动作
-            game_state = GameState(hand, state['caishen'],
-                                  wall_remaining=state['wall_remaining'],
-                                  current_player=current,
-                                  last_discarded=last_discarded)
+            # MCTS搜索
+            game_state = GameState(
+                hand, state['caishen'],
+                wall_remaining=state['wall_remaining'],
+                current_player=current,
+                last_discarded=last_discarded
+            )
+
+            mcts = AlphaZeroMCTS(
+                self.agent.net,
+                caishen_id=state['caishen'],
+                num_simulations=30,
+                batch_size=16
+            )
 
             try:
-                self.mcts.caishen_id = state['caishen']
-                policy_dict = self.mcts.search(game_state, last_discarded)
+                policy_dict = mcts.search(game_state, last_discarded)
             except:
                 policy_dict = {a: 1.0 / len(legal_actions) for a in legal_actions if a < 34}
 
-            # 转换为39维向量
-            policy = np.zeros(39)
+            # 转为41维向量
+            policy = np.zeros(41)
             for a, p in policy_dict.items():
-                if a < 34:
+                if 0 <= a < 41:
                     policy[a] = p
 
             if policy.sum() > 0:
                 policy = policy / policy.sum()
             else:
-                policy = np.ones(39) / 39
+                policy = np.ones(41) / 41
 
             # 采样动作
-            mask = np.zeros(39)
+            mask = np.zeros(41)
             for a in legal_actions:
-                mask[a] = policy[a]
+                if 0 <= a < 41:
+                    mask[a] = policy[a]
 
             if mask.sum() == 0:
                 action = random.choice(legal_actions) if legal_actions else 0
             else:
                 probs = mask / mask.sum()
-                action = np.random.choice(39, p=probs)
+                action = np.random.choice(41, p=probs)
 
-            # 更新last_discarded
             if action < 34:
                 last_discarded = action
 
@@ -103,18 +111,54 @@ class SelfPlayTester:
 
                 return winner, game_history
 
-            current = 1 - current
-
     def test(self, num_games=200, print_freq=50):
         """测试"""
         print(f"\n开始自对弈测试: {num_games}局")
         print("=" * 50)
 
         stats = {'p0': 0, 'p1': 0, 'draw': 0}
+
+        # 动作统计
+        actions_taken = {
+            'chi': 0, 'peng': 0, 'ming_gang': 0,
+            'jia_gang': 0, 'an_gang': 0, 'hu': 0, 'discard': 0
+        }
+
+        # 动作机会统计（当动作可用时，选择了这个动作的次数）
+        action_opportunities = {
+            'chi': 0, 'peng': 0, 'ming_gang': 0,
+            'jia_gang': 0, 'an_gang': 0, 'hu': 0
+        }
+        action_selections = {
+            'chi': 0, 'peng': 0, 'ming_gang': 0,
+            'jia_gang': 0, 'an_gang': 0, 'hu': 0
+        }
+
         start_time = time.time()
 
         for game in range(num_games):
-            winner, _ = self.play_one_game()
+            winner, game_history = self.play_one_game()
+
+            # 统计动作
+            for p in [0, 1]:
+                for traj in game_history[p]:
+                    policy = traj['policy']
+                    action = np.argmax(policy)
+
+                    if action == ACTION_CHI:
+                        actions_taken['chi'] += 1
+                    elif action == ACTION_PENG:
+                        actions_taken['peng'] += 1
+                    elif action == ACTION_MING_GANG:
+                        actions_taken['ming_gang'] += 1
+                    elif action == ACTION_JIA_GANG:
+                        actions_taken['jia_gang'] += 1
+                    elif action == ACTION_AN_GANG:
+                        actions_taken['an_gang'] += 1
+                    elif action == ACTION_HU:
+                        actions_taken['hu'] += 1
+                    elif action < 34:
+                        actions_taken['discard'] += 1
 
             if winner == 0:
                 stats['p0'] += 1
@@ -136,6 +180,17 @@ class SelfPlayTester:
                 print(f"  流局率: {draw_rate:.1f}%")
                 print(f"  速度: {speed:.1f}局/秒")
 
+                total_actions = sum(actions_taken.values())
+                if total_actions > 0:
+                    print(f"\n动作统计 (共{total_actions}次):")
+                    print(f"  出牌: {actions_taken['discard']} ({actions_taken['discard']/total_actions*100:.1f}%)")
+                    print(f"  吃: {actions_taken['chi']} ({actions_taken['chi']/total_actions*100:.1f}%)")
+                    print(f"  碰: {actions_taken['peng']} ({actions_taken['peng']/total_actions*100:.1f}%)")
+                    print(f"  明杠: {actions_taken['ming_gang']} ({actions_taken['ming_gang']/total_actions*100:.1f}%)")
+                    print(f"  加杠: {actions_taken['jia_gang']} ({actions_taken['jia_gang']/total_actions*100:.1f}%)")
+                    print(f"  暗杠: {actions_taken['an_gang']} ({actions_taken['an_gang']/total_actions*100:.1f}%)")
+                    print(f"  胡: {actions_taken['hu']} ({actions_taken['hu']/total_actions*100:.1f}%)")
+
         print("\n" + "=" * 50)
         print("最终结果:")
         print(f"  闲家(先手): {stats['p0']} 胜 ({stats['p0']/num_games*100:.1f}%)")
@@ -143,211 +198,20 @@ class SelfPlayTester:
         print(f"  流局: {stats['draw']} 次 ({stats['draw']/num_games*100:.1f}%)")
         print(f"  总用时: {time.time() - start_time:.1f}秒")
 
-        return stats
+        total_actions = sum(actions_taken.values())
+        if total_actions > 0:
+            print(f"\n动作统计 (共{total_actions}次):")
+            print(f"  出牌: {actions_taken['discard']} ({actions_taken['discard']/total_actions*100:.1f}%)")
+            print(f"  吃: {actions_taken['chi']} ({actions_taken['chi']/total_actions*100:.1f}%)")
+            print(f"  碰: {actions_taken['peng']} ({actions_taken['peng']/total_actions*100:.1f}%)")
+            print(f"  明杠: {actions_taken['ming_gang']} ({actions_taken['ming_gang']/total_actions*100:.1f}%)")
+            print(f"  加杠: {actions_taken['jia_gang']} ({actions_taken['jia_gang']/total_actions*100:.1f}%)")
+            print(f"  暗杠: {actions_taken['an_gang']} ({actions_taken['an_gang']/total_actions*100:.1f}%)")
+            print(f"  胡: {actions_taken['hu']} ({actions_taken['hu']/total_actions*100:.1f}%)")
 
-
-class GameState:
-    """简化游戏状态（用于MCTS）"""
-
-    ACTION_CHI = 35
-    ACTION_PENG = 36
-    ACTION_MING_GANG = 37
-    ACTION_JIA_GANG = 38
-    ACTION_AN_GANG = 39
-    ACTION_HU = 40
-
-    def __init__(self, hand, caishen_id, wall_remaining, current_player, last_discarded=None):
-        self.hand = list(hand) if not isinstance(hand, list) else hand
-        self.caishen_id = caishen_id
-        self.wall_remaining = wall_remaining
-        self.current_player = current_player
-        self.last_discarded = last_discarded
-        self.discarded = []
-        self.fulus = []
-
-    def get_legal_actions(self):
-        legal = []
-        for tile in set(self.hand):
-            if tile != self.caishen_id and tile != 33:
-                legal.append(tile)
-        return legal if legal else list(set(self.hand))
-
-    def get_legal_actions_with_special(self, last_discarded=None) -> list:
-        """获取完整合法动作包括吃碰杠胡"""
-        legal = self.get_legal_actions()
-
-        # 明杠（对手打出第4张）
-        if last_discarded is not None and self.hand.count(last_discarded) >= 3:
-            legal.append(self.ACTION_MING_GANG)
-
-        # 吃（只有闲家能吃上家）
-        if last_discarded is not None and self.current_player == 0:
-            if self._can_chi(last_discarded):
-                legal.append(self.ACTION_CHI)
-
-        # 胡（手牌17张时可胡）
-        if len(self.hand) == 17:
-            legal.append(self.ACTION_HU)
-
-        return legal
-
-    def _can_chi(self, discarded_tile: int) -> bool:
-        """检查是否能吃"""
-        tile_group = 0 if discarded_tile < 9 else 1 if discarded_tile < 18 else 2 if discarded_tile < 27 else 3
-        if tile_group >= 3:
-            return False
-        for offset in [-1, 0, 1]:
-            t1 = discarded_tile + offset
-            t2 = t1 + 1
-            t3 = t1 + 2
-            if t1 < 0 or t3 > 26:
-                continue
-            t1_group = 0 if t1 < 9 else 1 if t1 < 18 else 2 if t1 < 27 else 3
-            if t1_group != tile_group:
-                continue
-            if (self.hand.count(t1) >= 1 and
-                self.hand.count(t2) >= 1 and
-                self.hand.count(t3) >= 1):
-                return True
-        return False
-
-    def do_action(self, action: int):
-        """执行动作（包括吃/碰/杠/胡）"""
-        if action == self.ACTION_CHI:  # 吃
-            if self.last_discarded is not None:
-                for offset in [-1, 0, 1]:
-                    t1 = self.last_discarded + offset
-                    t2 = t1 + 1
-                    t3 = t1 + 2
-                    if t1 < 0 or t3 > 26:
-                        continue
-                    t1_group = 0 if t1 < 9 else 1 if t1 < 18 else 2 if t1 < 27 else 3
-                    last_group = 0 if self.last_discarded < 9 else 1 if self.last_discarded < 18 else 2 if self.last_discarded < 27 else 3
-                    if t1_group != last_group:
-                        continue
-                    if (self.hand.count(t1) >= 1 and
-                        self.hand.count(t2) >= 1 and
-                        self.hand.count(t3) >= 1):
-                        self._do_chi((t1, t2, t3))
-                        self.last_discarded = None
-                        self.current_player = 1 - self.current_player
-                        return
-            return
-        elif action == self.ACTION_PENG:  # 碰
-            if self.last_discarded is not None and self.hand.count(self.last_discarded) >= 2:
-                self._do_peng(self.last_discarded)
-                self.last_discarded = None
-                self.current_player = 1 - self.current_player
-                return
-        elif action == self.ACTION_MING_GANG:  # 明杠
-            if self.last_discarded is not None and self.hand.count(self.last_discarded) >= 3:
-                self._do_gang(self.last_discarded, 'ming')
-                self.last_discarded = None
-                self.current_player = 1 - self.current_player
-                return
-        elif action == self.ACTION_JIA_GANG:  # 加杠
-            if self.last_discarded is not None and self._has_jia_gang(self.last_discarded):
-                self._do_gang(self.last_discarded, 'jia')
-                self.last_discarded = None
-                self.current_player = 1 - self.current_player
-                return
-        elif action == self.ACTION_AN_GANG:  # 暗杠
-            if self._can_an_gang():
-                tile = self._get_an_gang_tile()
-                self._do_gang(tile, 'an')
-                self.last_discarded = None
-                return
-        elif action == self.ACTION_HU:  # 胡 - 终局
-            self.wall_remaining = 0
-            return
-
-        # 出牌动作
-        if action in self.hand:
-            self.hand.remove(action)
-            self.discarded.append(action)
-            self.last_discarded = action
-        self.wall_remaining -= 1
-        self.current_player = 1 - self.current_player
-
-    def _do_chi(self, chi_tiles):
-        for t in chi_tiles:
-            if t in self.hand:
-                self.hand.remove(t)
-        self.fulus.append(('chow', list(chi_tiles))) if hasattr(self, 'fulus') else None
-
-    def _do_peng(self, tile):
-        for _ in range(2):
-            if tile in self.hand:
-                self.hand.remove(tile)
-        if hasattr(self, 'fulus'):
-            self.fulus.append(('pong', [tile, tile, tile]))
-
-    def _do_gang(self, tile, gang_type='ming'):
-        """执行杠牌
-
-        Args:
-            tile: 杠的牌
-            gang_type: 'ming'(明杠), 'jia'(加杠), 'an'(暗杠)
-        """
-        if gang_type == 'ming':
-            for _ in range(3):
-                if tile in self.hand:
-                    self.hand.remove(tile)
-        elif gang_type == 'jia':
-            if tile in self.hand:
-                self.hand.remove(tile)
-        elif gang_type == 'an':
-            for _ in range(4):
-                if tile in self.hand:
-                    self.hand.remove(tile)
-        if hasattr(self, 'fulus'):
-            self.fulus.append(('kong', [tile, tile, tile, tile]))
-
-    def _has_jia_gang(self, tile) -> bool:
-        """检查能否加杠"""
-        for fulu in getattr(self, 'fulus', []):
-            if fulu[0] == 'pong' and fulu[1][0] == tile:
-                return self.hand.count(tile) >= 1
-        return False
-
-    def _can_an_gang(self) -> bool:
-        """检查能否暗杠"""
-        for tile in set(self.hand):
-            if self.hand.count(tile) >= 4:
-                return True
-        return False
-
-    def _get_an_gang_tile(self) -> int:
-        """获取第一组可暗杠的牌"""
-        for tile in set(self.hand):
-            if self.hand.count(tile) >= 4:
-                return tile
-        return -1
-
-    def is_terminal(self):
-        return self.wall_remaining <= 0
-
-    def get_observation(self):
-        obs = np.zeros(136, dtype=np.float32)
-
-        for tile in self.hand:
-            if 0 <= tile < 34:
-                obs[tile] += 1
-
-        for tile in self.discarded[-20:]:
-            if 0 <= tile < 34:
-                obs[34 + tile] += 1
-
-        if self.wall_remaining > 0:
-            idx = min(33, max(0, 68 + (self.wall_remaining // 3)))
-            obs[idx] = 1
-
-        if 0 <= self.caishen_id < 34:
-            obs[104 + min(self.caishen_id, 31)] = 1
-
-        return obs
+        return stats, actions_taken
 
 
 if __name__ == '__main__':
     tester = SelfPlayTester()
-    stats = tester.test(num_games=200, print_freq=50)
+    stats, action_stats = tester.test(num_games=200, print_freq=50)

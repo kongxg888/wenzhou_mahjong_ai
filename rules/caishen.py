@@ -11,7 +11,7 @@ class CaishenEngine:
     财神管理器
 
     财神可代替任意牌，白板只能代替财神本身
-    财神和白板都不能打出
+    财神不能打出，白板可以打出，但不能当作白板使用
     """
 
     def __init__(self, caishen_id: int):
@@ -57,11 +57,8 @@ class CaishenEngine:
 
     @staticmethod
     def get_caishen_from_flip(flip_card_id: int) -> int:
-        """
-        从翻出的牌计算财神ID
-        翻出牌的下一张是财神
-        """
-        return get_next_tile(flip_card_id)
+        """从翻出的牌计算财神ID - 翻到什么就是什么"""
+        return flip_card_id
 
     def __repr__(self):
         return f"CaishenEngine(caishen={self.caishen_id})"

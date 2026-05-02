@@ -122,13 +122,9 @@ class AlphaZeroNet(nn.Module):
         for block in self.res_tower:
             x = block(x)
 
-        # 输出 - 只对34维出牌计算softmax，特殊动作直接用logits
+        # 输出 - 对所有41维计算softmax（确保特殊动作有合理概率）
         policy_logits = self.policy_head(x)  # (batch, 41)
-        policy_34 = policy_logits[:, :34]  # 出牌部分
-        policy_softmax = torch.softmax(policy_34, dim=-1)  # 只对34维归一化
-
-        # 组合: 前34维是softmax，后7维直接用logits
-        policy = torch.cat([policy_softmax, policy_logits[:, 34:]], dim=-1)
+        policy = torch.softmax(policy_logits, dim=-1)  # 对所有41维归一化
 
         value = self.value_head(x)
 
@@ -242,11 +238,12 @@ class AlphaZeroMCTS:
 
         for i, node in enumerate(nodes):
             node.expanded = True
-            # 使用关联的state获取legal_actions
+            # 使用关联的state获取legal_actions（使用state自身的last_discarded）
             if node.state is not None:
-                legal_actions = node.state.get_legal_actions_with_special(last_discarded)
+                # 传入state自身的last_discarded用于判断
+                legal_actions = node.state.get_legal_actions_with_special(node.state.last_discarded)
             else:
-                legal_actions = list(range(34))  # fallback
+                legal_actions = list(range(41))  # fallback
 
             for action in legal_actions:
                 if action < 34:
@@ -450,7 +447,7 @@ class AlphaZeroAgent:
 
         Args:
             batch: [(state, policy, value), ...]
-            policy 是39维向量 (0-33出牌概率, 34过, 35吃, 36碰, 37杠, 38胡)
+            policy 是41维向量 (0-33出牌, 34过, 35吃, 36碰, 37明杠, 38加杠, 39暗杠, 40胡)
         """
         if len(batch) < batch_size:
             return 0.0
@@ -458,11 +455,11 @@ class AlphaZeroAgent:
         # 采样
         batch_data = random.sample(batch, batch_size)
 
-        # 修复: 先stack成numpy数组，避免从list创建tensor
+        # 构建批次数据
         states_np = np.stack([d['state'] for d in batch_data])
         states = torch.from_numpy(states_np).float().to(self.device)
 
-        # 目标策略: 41维 - 预分配并填充
+        # 目标策略: 41维
         target_policies = torch.zeros(batch_size, 41)
         for i, d in enumerate(batch_data):
             p = d['policy']
@@ -474,21 +471,12 @@ class AlphaZeroAgent:
         target_values = torch.from_numpy(np.array([d['value'] for d in batch_data])).float().to(self.device)
 
         # 前向传播
-        policies, values = self.net(states)  # policies: (batch, 39)
+        policies, values = self.net(states)  # policies: (batch, 41)
 
-        # KL散度 Loss - 安全计算
-        # 避免log(0)和数值爆炸
-        eps = 1e-10
-        policies_safe = torch.clamp(policies, min=eps, max=1.0)
-        target_safe = torch.clamp(target_policies, min=eps, max=1.0)
-
-        # 归一化确保和为1
-        policies_safe = policies_safe / policies_safe.sum(dim=-1, keepdim=True)
-        target_safe = target_safe / target_safe.sum(dim=-1, keepdim=True)
-
+        # KL散度 Loss
         policy_loss = nn.KLDivLoss(reduction='batchmean')(
-            torch.log(policies_safe),
-            target_safe
+            torch.log(policies + 1e-10),
+            target_policies
         )
         value_loss = nn.MSELoss()(values.squeeze(), target_values)
         loss = policy_loss + 0.5 * value_loss

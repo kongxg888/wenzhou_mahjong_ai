@@ -40,6 +40,10 @@ class GameState:
         legal = self.get_legal_actions()
 
         if last_discarded is not None and last_discarded < 34:
+            # 碰（手中有一对 + 对手打出）
+            if self.hand.count(last_discarded) >= 2:
+                legal.append(ACTION_PENG)
+
             # 明杠
             if self.hand.count(last_discarded) >= 3:
                 legal.append(ACTION_MING_GANG)
